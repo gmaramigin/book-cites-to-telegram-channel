@@ -189,8 +189,8 @@ async def button(update: Update, context: CallbackContext):
 
 # 🕒 Планировщик
 scheduler = BackgroundScheduler()
-scheduler.add_job(lambda: asyncio.run(fetch_quotes()), 'cron', hour=3, minute=50)
-scheduler.add_job(lambda: asyncio.run(send_quote_to_channel()), 'cron', hour=3, minute=51)
+scheduler.add_job(lambda: asyncio.run(fetch_quotes()), 'cron', hour=2, minute=59)
+scheduler.add_job(lambda: asyncio.run(send_quote_to_channel()), 'cron', hour=3, minute=0)
 scheduler.start()
 
 
