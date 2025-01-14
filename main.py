@@ -12,7 +12,7 @@ from telegram.ext import (
     CallbackContext
 )
 from notion_client import AsyncClient
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # 🔑 API Токены
 NOTION_TOKEN = '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'
@@ -26,7 +26,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # 🧠 Глобальные переменные для управления цитатами
 quote_pool = []  # Список цитат для отправки
-used_quotes = []  # Список использованных цитат
+used_quotes = []  # Список уже использованных цитат
 CACHE_FILE = 'quotes_cache.json'
 
 # 🛡️ Логирование
@@ -34,7 +34,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
 
 # 🗂️ Кэширование данных
 def save_cache(quotes):
@@ -55,7 +54,7 @@ def load_cache():
         return []
 
 
-# 🎯 Получение всех цитат из Notion с использованием асинхронных запросов
+# 🎯 Получение всех цитат из Notion (асинхронно)
 async def fetch_quotes():
     global quote_pool, used_quotes
     try:
@@ -95,7 +94,7 @@ async def fetch_quotes():
         logging.error(f"❌ Ошибка при получении цитат: {e}")
 
 
-# 📦 Обработка одной страницы в Notion
+# 📦 Обработка одной страницы Notion
 async def process_notion_page(page):
     try:
         page_id = page['id']
@@ -118,7 +117,10 @@ async def process_notion_page(page):
                     if quote.strip():
                         book_quotes.append(quote)
 
-        return [{'quote': quote, 'author': author, 'book_name': book_name} for quote in book_quotes]
+        return [
+            {'quote': quote, 'author': author, 'book_name': book_name}
+            for quote in book_quotes
+        ]
     except Exception as e:
         logging.error(f"❌ Ошибка при обработке страницы: {e}")
         return []
@@ -132,7 +134,9 @@ def get_next_quote():
         logging.info("🔄 Перезагрузка цитат...")
         quote_pool.extend(load_cache())
         if not quote_pool:
-            asyncio.run(fetch_quotes())
+            # Если кэш пуст — загружаем из Notion в синхронном стиле
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(fetch_quotes())
 
     if not quote_pool:
         logging.warning("⚠️ Цитаты закончились.")
@@ -141,6 +145,7 @@ def get_next_quote():
     next_quote = quote_pool.pop()
     used_quotes.append(next_quote)
 
+    # Если пул опустел, перезагружаем его из used_quotes
     if not quote_pool:
         quote_pool = used_quotes.copy()
         random.shuffle(quote_pool)
@@ -149,7 +154,7 @@ def get_next_quote():
     return next_quote
 
 
-# 🚀 Автоматическая отправка цитаты в Telegram-канал
+# 🚀 Отправка цитаты в Telegram-канал (асинхронно)
 async def send_quote_to_channel():
     try:
         quote_data = get_next_quote()
@@ -159,7 +164,6 @@ async def send_quote_to_channel():
             logging.warning("⚠️ Цитаты закончились.")
         else:
             message_template = f"""
-
 🌟 *Цитата дня*
 ✍️ *{quote_data['author']}*
 📖 *{quote_data['book_name']}*
@@ -172,13 +176,16 @@ async def send_quote_to_channel():
         logging.error(f"❌ Ошибка при отправке цитаты: {e}")
 
 
-# 🛠️ Команды для Telegram
+# 🛠️ Команды для Telegram (асинхронно)
 async def start(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("📖 Отправить цитату в канал", callback_data='send_to_channel')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('👋 Привет! Нажмите на кнопку ниже, чтобы отправить цитату в канал.', reply_markup=reply_markup)
+    await update.message.reply_text(
+        '👋 Привет! Нажмите на кнопку ниже, чтобы отправить цитату в канал.',
+        reply_markup=reply_markup
+    )
 
 
 async def button(update: Update, context: CallbackContext):
@@ -187,23 +194,39 @@ async def button(update: Update, context: CallbackContext):
     await send_quote_to_channel()
 
 
-# 🕒 Планировщик
-scheduler = BackgroundScheduler()
-scheduler.add_job(lambda: asyncio.run(fetch_quotes()), 'cron', hour=2, minute=59)
-scheduler.add_job(lambda: asyncio.run(send_quote_to_channel()), 'cron', hour=3, minute=0)
-scheduler.start()
+# ⚙️ Асинхронная "точка входа"
+async def main():
+    # 1) Изначально загрузим цитаты (если в кэше ничего нет)
+    await fetch_quotes()
 
-
-def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(fetch_quotes())
-
+    # 2) Инициализируем приложение бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button))
-    application.run_polling()
+
+    # 3) Создаём асинхронный планировщик и планируем задачи
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(fetch_quotes, 'cron', hour=2, minute=59)
+    scheduler.add_job(send_quote_to_channel, 'cron', hour=3, minute=0)
+    scheduler.start()
+
+    # 4) Запускаем бота "вручную"
+    await application.initialize()
+    await application.start()
+
+    # 5) Запускаем "долгую" (бесконечную) обработку апдейтов
+    #    Вместо run_polling() вызываем updater.start_polling() (PTB 20+)
+    await application.updater.start_polling()
+
+    # 6) Ждём «вечно» (или пока не прервём Ctrl+C)
+    await asyncio.Event().wait()
+
+    # 7) Если что-то завершается (например, Ctrl+C) — корректно останавливаем бота
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
 
 
 if __name__ == '__main__':
-    main()
+    # Запускаем всё в одном event loop
+    asyncio.run(main())
